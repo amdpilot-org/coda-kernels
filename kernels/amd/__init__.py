@@ -1,0 +1,1 @@
+# AMD CODA kernel paths
