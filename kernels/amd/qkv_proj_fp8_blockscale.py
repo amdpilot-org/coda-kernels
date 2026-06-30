@@ -35,13 +35,19 @@ from aiter.ops.gemm_op_a8w8 import (
     gemm_a8w8_blockscale as _aiter_blockscale,
     gemm_a8w8_blockscale_tune as _aiter_blockscale_tune,
 )
+from aiter.jit.core import get_module as _get_module
 
 # The import above triggers @compile_ops which registers the torch custom op.
-# Capture the *direct* torch.ops binding to bypass the Python ``wrapper_custom``
-# dispatch layer (which does ``getattr(torch.ops.aiter, name)(*args, **kwargs)``
-# on every call).  Calling ``.default`` directly with positional args shaves
-# ~1.3 us of Python overhead per call.
-_DIRECT_TUNE = torch.ops.aiter.gemm_a8w8_blockscale_tune.default
+# However, calling through torch.ops.aiter.<op>.default still traverses two
+# Python wrapper layers: the torch_compile_guard ``outer_wrapper`` and the
+# compile_ops ``wrapper`` (which does module lookup + arg checking on every
+# call).  We bypass ALL of that by grabbing the raw pybind11 C++ function
+# directly from the loaded .so module.  This shaves ~3 us of Python dispatch
+# overhead per call vs torch.ops, and ~4 us vs the full Python wrapper.
+_DIRECT_TUNE = getattr(
+    _get_module("module_gemm_a8w8_blockscale_tune"),
+    "gemm_a8w8_blockscale_tune",
+)
 
 # Llama-3.3 70B QKV pre-projection shape (issue #7).
 # hidden=8192, num_heads=64, num_kv_heads=8, head_dim=128.
