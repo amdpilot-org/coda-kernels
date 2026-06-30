@@ -59,14 +59,15 @@ QKV_OUT_FEATURES = (QKV_NUM_HEADS + 2 * QKV_NUM_KV_HEADS) * QKV_HEAD_DIM  # 1024
 QKV_SHAPE = (8, QKV_OUT_FEATURES, QKV_HIDDEN)  # (M, N, K) at batch=8
 
 # Shape-tuned CK instance for M=8, N=10240, K=8192 on gfx942 (MI300X).
-# Selected by sweeping gemm_a8w8_blockscale_tune(kernelId in {1,2,3,5,6,7,8,
-# 11,12,13,18}, splitK in {0,1,2}) under the canonical harness methodology;
-# kernelId=8 (splitK 0/1/2 all within noise, ~0.0355 ms) beats the AITER default
-# (~0.048 ms) by ~1.36x, meeting the <0.8x baseline acceptance target.
-# splitK=2 had the best median across repeated sweeps (0.0358 ms vs 0.0360 ms
-# for splitK=1); the difference is within noise but consistent across runs.
+# Selected by sweeping gemm_a8w8_blockscale_tune(kernelId 0-18, splitK in
+# {0,1,2,3,4,8,16}) via direct C++ pybind11 call under the canonical harness
+# methodology.  kernelId=8 beats the AITER default (~0.048 ms) by ~1.5x,
+# meeting the <0.8x baseline acceptance target.
+# splitK=0 is consistently fastest with the direct C++ call path (no split-K
+# reduction overhead needed for M=8): 0.03199 ms vs 0.03211 ms for sk=2.
+# The difference is small (~0.1 us) but consistent across repeated sweeps.
 TUNED_KERNEL_ID = 8
-TUNED_SPLIT_K = 2
+TUNED_SPLIT_K = 0
 
 # Capture the real AITER implementation before any install() so the fallback
 # path can delegate to it without recursing through the (possibly patched)
