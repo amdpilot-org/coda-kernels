@@ -43,8 +43,10 @@ _GRAPH_CACHE: dict = {}
 # CUDA graph result cache: graph_key -> captured result tensor
 _RESULT_CACHE: dict = {}
 
-# Call counter to know when to switch from normal exec to graph capture.
-_CallCount = 0
+# Stable input-buffer cache: (shape, dtype, device) -> buffer.
+# The captured CUDA graph reads from this buffer's fixed address; each call
+# copies the caller's `a` into it so the graph always sees current data.
+_INPUT_BUF_CACHE: dict = {}
 
 
 def _get_cached_concat(b_gate, b_up, scale_gate, scale_up):
@@ -54,6 +56,21 @@ def _get_cached_concat(b_gate, b_up, scale_gate, scale_up):
         scale = torch.cat([scale_gate, scale_up], dim=0)
         _CONCAT_CACHE[key] = (b, scale)
     return _CONCAT_CACHE[key]
+
+
+def _get_input_buf(a):
+    """Return a persistent buffer matching ``a``'s shape/dtype/device.
+
+    The CUDA graph captures this buffer's address; copying each caller's ``a``
+    into it makes replay correct regardless of the caller's allocation pattern
+    (fresh tensor each call, id recycling, in-place updates, etc.).
+    """
+    key = (a.shape, a.dtype, str(a.device))
+    buf = _INPUT_BUF_CACHE.get(key)
+    if buf is None:
+        buf = torch.empty_like(a)
+        _INPUT_BUF_CACHE[key] = buf
+    return buf
 
 
 def _normal_fused(a, b, scale, N, dtype):
@@ -95,9 +112,10 @@ def gemm_a16wfp4_swiglu_fused(
 ):
     """Fused MXFP4 GEMM(gate+up) + SwiGLU via single concat-GEMM.
 
-    On the first invocation returns a normal (non-graph) result so the harness
-    correctness check passes cleanly.  After that, captures a CUDA graph and
-    replays it for all subsequent calls to avoid CPU launch overhead.
+    Captures a CUDA graph keyed on the *stable* input buffer (not the caller's
+    ``a``), then replays it on subsequent calls to avoid CPU launch overhead.
+    Each call copies ``a`` into the buffer so the graph always reads current
+    data; the returned tensor is cloned so callers may keep multiple results.
     Falls back to normal execution if graph capture fails.
 
     Args:
@@ -111,28 +129,29 @@ def gemm_a16wfp4_swiglu_fused(
     Returns:
         (M, N) BF16 SwiGLU output
     """
-    global _CallCount
-    _CallCount += 1
-
     b, scale = _get_cached_concat(b_gate, b_up, scale_gate, scale_up)
     N = b_gate.shape[0]
-    graph_key = (id(a), id(b), id(scale), dtype)
+
+    # Copy activations into a stable buffer so the captured graph always reads
+    # from the same address.  Keying on id(a) (the previous approach) was
+    # unsafe: a fresh `a` each call missed the cache and re-captured every
+    # time, and a recycled id(a) replayed against freed memory.
+    a_buf = _get_input_buf(a)
+    a_buf.copy_(a)
+    graph_key = (a_buf.shape, a_buf.dtype, str(a_buf.device), id(b), id(scale), dtype)
 
     # Fast path: graph replay.
     if graph_key in _GRAPH_CACHE:
         _GRAPH_CACHE[graph_key].replay()
-        return _RESULT_CACHE[graph_key]
+        return _RESULT_CACHE[graph_key].clone()
 
-    # First call: normal execution (harness correctness check).
-    if _CallCount == 1:
-        return _normal_fused(a, b, scale, N, dtype)
-
-    # Second+call with new graph key: capture graph.
+    # New graph key: capture (warmup + capture + validate), then clone result.
     try:
-        return _capture_and_cache(a, b, scale, N, dtype, graph_key)
+        _capture_and_cache(a_buf, b, scale, N, dtype, graph_key)
+        return _RESULT_CACHE[graph_key].clone()
     except Exception as exc:
         warnings.warn(f"CUDA graph capture failed ({exc}); falling back to normal execution.")
-        return _normal_fused(a, b, scale, N, dtype)
+        return _normal_fused(a_buf, b, scale, N, dtype)
 
 
 def fused_mxfp4_gemm_swiglu(
