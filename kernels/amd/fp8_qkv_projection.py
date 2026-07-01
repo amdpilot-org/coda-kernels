@@ -20,6 +20,16 @@ cktile, and cktile is ~6x slower here).  The tuned tile is therefore only
 reachable through the ``gemm_a8w8_blockscale_tune`` entry point, which this
 module calls directly.  This is the CODA AMD candidate path requested by
 amdpilot-org/coda-kernels#7.
+
+Alternatives ruled out by empirical sweep on gfx942 (cu_num=304):
+  * ``gemm_a8w8_blockscale_cktile_tune`` — all kernelIds slower (best 0.409 ms
+    vs 0.026 ms for ck kernelId=8).
+  * ``gemm_a8w8_blockscale_bpreshuffle_ck`` with ``shuffle_weight(w, (16,16))``
+    — parity-correct but slower (0.886x baseline vs 0.656x for kernelId=8).
+    Layouts (32,16)/(32,32) fail parity; (16,32) also slower.
+  * splitK sweep (0,1,2,3,4,8,16) — no gain (K=8192 already well-parallelized).
+  * CUDA graph capture — counterproductive (0.955x; replay overhead exceeds
+    the ~26 us kernel time).
 """
 import sys
 
