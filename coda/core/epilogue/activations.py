@@ -9,6 +9,8 @@ from quack.epilogue.ops import (
     ColVecLoad,
     ColVecReduce,
     RowVecLoad,
+    RowVecReduce,
+    TileLoad,
 )
 
 
@@ -99,3 +101,43 @@ def dswiglu_preact_zdz_scaled_epi(acc: EpiValue, c: EpiValue, scale: EpiValue) -
     dx, dy, out = dswiglu(x, y, acc)
     zdz = (dx * x + dy * y) * scale
     return {"D": pack(dx, dy), "postact": out, "zdz": zdz}
+
+
+@gemm_epilogue(
+    outputs=("normed",),
+    ops={
+        "rstd": ColVecLoad("rstd"),
+        "zdz": ColVecLoad("zdz"),
+        "weight": RowVecLoad("weight"),
+        "pre": TileLoad("pre"),
+    },
+    reduces={"dweight": RowVecReduce("dweight", scaled=True)},
+)
+def residual_rmsnorm_bwd_epi(acc: EpiValue, rstd: EpiValue, zdz: EpiValue, weight: EpiValue, pre: EpiValue) -> EpiOut:
+    c_norm = pre * rstd
+    return {
+        "D": (acc * weight - c_norm * zdz) * rstd,
+        "normed": c_norm * weight,
+        "dweight": (acc, c_norm),
+    }
+
+
+@gemm_epilogue(
+    outputs=("normed",),
+    ops={
+        "rstd": ColVecLoad("rstd"),
+        "zdz": ColVecLoad("zdz"),
+        "weight": RowVecLoad("weight"),
+        "pre": TileLoad("pre"),
+        "alpha": Scalar("alpha"),
+    },
+    reduces={"dweight": RowVecReduce("dweight", scaled=True)},
+)
+def alpha_residual_rmsnorm_bwd_epi(acc: EpiValue, rstd: EpiValue, zdz: EpiValue, weight: EpiValue, pre: EpiValue, alpha: EpiValue) -> EpiOut:
+    y = acc * alpha
+    c_norm = pre * rstd
+    return {
+        "D": (y * weight - c_norm * zdz) * rstd,
+        "normed": c_norm * weight,
+        "dweight": (y, c_norm),
+    }
